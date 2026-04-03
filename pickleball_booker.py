@@ -284,7 +284,8 @@ def _scan_and_book(page, target_date_str: str, card_date_str: str, dry_run: bool
 
         if fee_cents > 0: continue
 
-        already = bool(re.search(r"registered|already registered|edit registration|withdraw", text, re.IGNORECASE))
+        btn_text = btn.inner_text().strip().upper()
+        already = btn_text in ("EDIT REGISTRATION", "WITHDRAW")
 
         qualifying_sessions.append({
             "time_str": time_display,
