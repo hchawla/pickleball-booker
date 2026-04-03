@@ -184,8 +184,9 @@ def book_pickleball_session(dry_run: bool = False, target_time: str = None, targ
                     page.wait_for_timeout(2000)
 
                 else:
-                    # Click "Custom" to reveal date range inputs
-                    page.get_by_text("Custom", exact=True).click()
+                    # Click "Custom" under the Dates section (first match; "Custom" also
+                    # appears under Time of Day, which is the second match)
+                    page.get_by_text("Custom", exact=True).first.click()
                     page.wait_for_timeout(1500)
 
                     if debug:
