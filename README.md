@@ -27,7 +27,7 @@ A standalone OpenClaw skill to automate court reservations at Pickleball Haven L
 - **Check today's availability (Dry Run):**
   `python3 pickleball_booker.py --dry-run`
 - **Book for tomorrow at 8:00 AM:**
-  `python3 pickleball_booker.py --tomorrow --target-time "8:00 AM"`
+  `python3 pickleball_booker.py --date "2026-04-03" --target-time "8:00 AM"`
 
 ### Via the OpenClaw Agent
 Ask your agent:
