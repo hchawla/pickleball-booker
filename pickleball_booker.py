@@ -117,6 +117,8 @@ def book_pickleball_session(dry_run: bool = False, target_time: str = None, targ
     iso_date = target_date.strftime("%Y-%m-%d")
     # MM/DD/YYYY — the format CourtReserve datepicker inputs expect
     picker_date = target_date.strftime("%m/%d/%Y")
+    # Short format used in CourtReserve event card headers (e.g. "Mon Apr 6")
+    card_date_str = target_date.strftime("%a %b %-d")
 
     target_h, target_m = None, None
     if target_time:
@@ -187,7 +189,7 @@ def book_pickleball_session(dry_run: bool = False, target_time: str = None, targ
             except Exception as e:
                 return {"status": "error", "message": f"Date navigation error: {str(e)[:100]}"}
 
-            return _scan_and_book(page, display_date_str, dry_run=dry_run, target_h=target_h, target_m=target_m)
+            return _scan_and_book(page, display_date_str, card_date_str, dry_run=dry_run, target_h=target_h, target_m=target_m)
 
         except Exception as e:
             return {"status": "error", "message": f"Unexpected error: {str(e)[:120]}"}
@@ -195,7 +197,7 @@ def book_pickleball_session(dry_run: bool = False, target_time: str = None, targ
             browser.close()
 
 
-def _scan_and_book(page, target_date_str: str, dry_run: bool = False, target_h: int = None, target_m: int = None) -> dict:
+def _scan_and_book(page, target_date_str: str, card_date_str: str, dry_run: bool = False, target_h: int = None, target_m: int = None) -> dict:
     page.wait_for_timeout(2000)
 
     reg_buttons = page.locator(
@@ -222,6 +224,10 @@ def _scan_and_book(page, target_date_str: str, dry_run: bool = False, target_h: 
 
         if not card_text: continue
         text = card_text
+
+        # Only process cards that belong to the target date
+        if card_date_str.lower() not in text.lower():
+            continue
 
         time_pat = r"(\d{1,2}(?::\d{2})?\s*(?:am|pm|a|p))"
         range_pat = rf"{time_pat}\s*[-–—to]+\s*{time_pat}"
@@ -279,7 +285,7 @@ def _scan_and_book(page, target_date_str: str, dry_run: bool = False, target_h: 
 
     already_booked = [s for s in qualifying_sessions if s["already_booked"]]
     if already_booked:
-        return {"status": "already_booked", "time": already_booked[0]["time_str"]}
+        return {"status": "already_booked", "time": already_booked[0]["time_str"], "date": target_date_str}
 
     target = qualifying_sessions[0]
 
