@@ -113,14 +113,10 @@ def book_pickleball_session(dry_run: bool = False, target_time: str = None, targ
 
     display_date_str = target_date.strftime("%A, %B %-d, %Y")   # Monday, April 6, 2026
     iso_date         = target_date.strftime("%Y-%m-%d")          # 2026-04-06
-    picker_date      = target_date.strftime("%m/%d/%Y")          # 04/06/2026 — for custom inputs
 
-    # Multiple patterns to verify the page is showing the right date
-    date_check_patterns = [
-        target_date.strftime("%a %b %-d"),  # Mon Apr 6
-        target_date.strftime("%b %-d"),     # Apr 6
-        target_date.strftime("%B %-d"),     # April 6
-    ]
+    # Short pattern used in CourtReserve card text e.g. "Mon, Apr 6th, 9a - 12p"
+    # "Apr 6" is a substring of "Apr 6th" so strftime("%-d") works without ordinal suffix
+    card_date_str = target_date.strftime("%b %-d")  # Apr 6
 
     # Days from today (floor to midnight for accurate diff)
     today_date  = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -184,85 +180,10 @@ def book_pickleball_session(dry_run: bool = False, target_time: str = None, targ
                     page.wait_for_timeout(2000)
 
                 else:
-                    # Click "Custom" under the Dates section (first match; "Custom" also
-                    # appears under Time of Day, which is the second match)
-                    page.get_by_text("Custom", exact=True).first.click()
-                    page.wait_for_timeout(1500)
-
-                    if debug:
-                        snap = SKILL_DIR / f"debug_{iso_date}_after_custom_click.png"
-                        page.screenshot(path=str(snap), full_page=True)
-                        sys.stderr.write(f"[debug] after Custom click: {snap}\n")
-                        # Dump text/date inputs and Kendo widget inputs specifically
-                        inputs_info = page.evaluate('''() => {
-                            return Array.from(document.querySelectorAll("input")).filter(el => {
-                                if (el.offsetParent === null) return false;
-                                var cls = el.className || "";
-                                var role = el.getAttribute("data-role") || "";
-                                return el.type === "text" || el.type === "date"
-                                    || cls.includes("k-input")
-                                    || role.includes("date");
-                            }).map(el => ({
-                                type: el.type, id: el.id, name: el.name,
-                                placeholder: el.placeholder,
-                                cls: el.className.substring(0, 100),
-                                value: el.value,
-                                "data-role": el.getAttribute("data-role"),
-                                "aria-label": el.getAttribute("aria-label")
-                            }));
-                        }''')
-                        sys.stderr.write(f"[debug] text/date inputs: {json.dumps(inputs_info, indent=2)}\n")
-
-                    # Fill the Kendo DatePicker custom date range.
-                    # Confirmed IDs for this site: CustomDate_Start / CustomDate_End.
-                    # Must use the Kendo jQuery API — plain DOM events don't trigger
-                    # Kendo's internal state update or the AJAX filter reload.
-                    custom_filled = False
-                    try:
-                        kendo_result = page.evaluate(f'''() => {{
-                            if (!window.$) return "no-jquery";
-                            var sp = $("#CustomDate_Start").data("kendoDatePicker");
-                            var ep = $("#CustomDate_End").data("kendoDatePicker");
-                            if (!sp || !ep) return "no-widget";
-                            sp.value("{picker_date}");
-                            sp.trigger("change");
-                            ep.value("{picker_date}");
-                            ep.trigger("change");
-                            return "ok";
-                        }}''')
-                        if kendo_result == "ok":
-                            custom_filled = True
-                        elif debug:
-                            sys.stderr.write(f"[debug] kendo fill result: {kendo_result}\n")
-                    except Exception as ex:
-                        if debug:
-                            sys.stderr.write(f"[debug] kendo fill exception: {ex}\n")
-
-                    # If Kendo API unavailable, fall back to Playwright .fill() + Tab
-                    if not custom_filled:
-                        try:
-                            s = page.locator("#CustomDate_Start")
-                            e = page.locator("#CustomDate_End")
-                            if s.count() > 0 and e.count() > 0:
-                                s.triple_click()
-                                s.type(picker_date)
-                                s.press("Tab")
-                                page.wait_for_timeout(300)
-                                e.triple_click()
-                                e.type(picker_date)
-                                e.press("Tab")
-                                custom_filled = True
-                        except Exception:
-                            pass
-
-                    if not custom_filled:
-                        return {"status": "error", "message": f"Could not fill custom date inputs for {picker_date}. Run --debug to inspect."}
-
-                    if not custom_filled:
-                        return {"status": "error", "message": f"Could not fill custom date inputs for {picker_date}. Run --debug to inspect the page after clicking Custom."}
-
-                    page.wait_for_load_state("networkidle")
-                    page.wait_for_timeout(2000)
+                    # For dates 2-7 days out, the default page load already shows
+                    # ~10 days of sessions. Per-card date filtering in _scan_and_book
+                    # (using card_date_str = "Apr 6") scopes results to the target day.
+                    page.wait_for_timeout(3000)
 
             except Exception as e:
                 return {"status": "error", "message": f"Date filter error: {str(e)[:100]}"}
@@ -274,13 +195,13 @@ def book_pickleball_session(dry_run: bool = False, target_time: str = None, targ
                 body_text = page.inner_text("body")
                 text_path.write_text(body_text)
                 sys.stderr.write(f"[debug] final screenshot: {debug_path}\n")
-                sys.stderr.write(f"[debug] days_diff: {days_diff}, date_check_patterns: {date_check_patterns}\n")
-                # Show first dates mentioned so we can confirm correct date loaded
+                sys.stderr.write(f"[debug] days_diff: {days_diff}, card_date_str: {card_date_str}\n")
+                # Show first dates mentioned so we can confirm target date is present
                 import re as _re
                 dates_found = _re.findall(r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d+", body_text)
                 sys.stderr.write(f"[debug] dates on page: {list(dict.fromkeys(dates_found))[:10]}\n")
 
-            return _scan_and_book(page, display_date_str, date_check_patterns, dry_run=dry_run, target_h=target_h, target_m=target_m)
+            return _scan_and_book(page, display_date_str, card_date_str, dry_run=dry_run, target_h=target_h, target_m=target_m)
 
         except Exception as e:
             return {"status": "error", "message": f"Unexpected error: {str(e)[:120]}"}
@@ -288,14 +209,13 @@ def book_pickleball_session(dry_run: bool = False, target_time: str = None, targ
             browser.close()
 
 
-def _scan_and_book(page, target_date_str: str, date_check_patterns: list, dry_run: bool = False, target_h: int = None, target_m: int = None) -> dict:
+def _scan_and_book(page, target_date_str: str, card_date_str: str, dry_run: bool = False, target_h: int = None, target_m: int = None) -> dict:
     page.wait_for_timeout(2000)
 
-    # Verify the page is showing the target date (any format pattern suffices)
+    # Verify the target date appears somewhere on the page before scanning
     page_body = page.inner_text("body")
-    page_body_lower = page_body.lower()
-    if not any(p.lower() in page_body_lower for p in date_check_patterns):
-        return {"status": "error", "message": f"Page does not show sessions for {target_date_str}. Checked patterns: {date_check_patterns}. Run --debug to inspect."}
+    if card_date_str.lower() not in page_body.lower():
+        return {"status": "none_available", "message": f"No sessions found for {target_date_str} ({card_date_str}). Sessions may not be posted yet."}
 
     reg_buttons = page.locator(
         "button:has-text('Register'), a:has-text('Register'), "
@@ -321,6 +241,11 @@ def _scan_and_book(page, target_date_str: str, date_check_patterns: list, dry_ru
 
         if not card_text: continue
         text = card_text
+
+        # Skip cards not belonging to the target date.
+        # Card text contains e.g. "Mon, Apr 6th, 9a - 12p" so "Apr 6" is a substring.
+        if card_date_str.lower() not in text.lower():
+            continue
 
         time_pat = r"(\d{1,2}(?::\d{2})?\s*(?:am|pm|a|p))"
         range_pat = rf"{time_pat}\s*[-–—to]+\s*{time_pat}"
