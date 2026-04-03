@@ -90,7 +90,7 @@ def _get_time_diff(h1: int, m1: int, h2: int, m2: int) -> int:
 
 # ── Main entry point ───────────────────────────────────────────────────────────
 
-def book_pickleball_session(dry_run: bool = False, tomorrow: bool = False, target_time: str = None, target_date_str: str = None) -> dict:
+def book_pickleball_session(dry_run: bool = False, target_time: str = None, target_date_str: str = None) -> dict:
     try:
         from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
     except ImportError:
@@ -109,7 +109,7 @@ def book_pickleball_session(dry_run: bool = False, tomorrow: bool = False, targe
         except ValueError:
             return {"status": "error", "message": f"Invalid date format: {target_date_str}. Use YYYY-MM-DD."}
     else:
-        target_date = datetime.now() + timedelta(days=1 if tomorrow else 0)
+        target_date = datetime.now()
     
     # CourtReserve display format for matching in scan
     display_date_str = target_date.strftime("%a %b %-d")
@@ -169,11 +169,6 @@ def book_pickleball_session(dry_run: bool = False, tomorrow: bool = False, targe
                 pass
 
             return _scan_and_book(page, display_date_str, dry_run=dry_run, target_h=target_h, target_m=target_m)
-
-        except Exception as e:
-            return {"status": "error", "message": f"Unexpected error: {str(e)[:120]}"}
-        finally:
-            browser.close()
 
         except Exception as e:
             return {"status": "error", "message": f"Unexpected error: {str(e)[:120]}"}
@@ -359,9 +354,8 @@ def _register_session(page, session: dict, target_date_str: str) -> dict:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--tomorrow", action="store_true")
     parser.add_argument("--date", type=str, help="Target date in YYYY-MM-DD format")
     parser.add_argument("--target-time", type=str)
     args = parser.parse_args()
 
-    print(json.dumps(book_pickleball_session(args.dry_run, args.tomorrow, args.target_time, args.date), indent=2))
+    print(json.dumps(book_pickleball_session(args.dry_run, args.target_time, args.date), indent=2))

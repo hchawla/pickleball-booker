@@ -19,8 +19,8 @@ The agent calls this via bash. The agent is responsible for calculating the spec
 # Book for a specific date (up to 7 days out)
 python3 pickleball_booker.py --date "2026-04-03" --target-time "9:00 AM"
 
-# Check availability for tomorrow
-python3 pickleball_booker.py --tomorrow --dry-run
+# Dry-run to check availability without booking
+python3 pickleball_booker.py --date "2026-04-03" --dry-run
 ```
 
 ## Setup (User)
