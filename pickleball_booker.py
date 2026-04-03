@@ -110,15 +110,27 @@ def book_pickleball_session(dry_run: bool = False, target_time: str = None, targ
             return {"status": "error", "message": f"Invalid date format: {target_date_str}. Use YYYY-MM-DD."}
     else:
         target_date = datetime.now()
-    
-    # Human-readable date for agent confirmation and response labels
-    display_date_str = target_date.strftime("%A, %B %-d, %Y")
-    # YYYY-MM-DD for URL/Picker
-    iso_date = target_date.strftime("%Y-%m-%d")
-    # MM/DD/YYYY — the format CourtReserve datepicker inputs expect
-    picker_date = target_date.strftime("%m/%d/%Y")
-    # Short format used in CourtReserve event card headers (e.g. "Mon Apr 6")
-    card_date_str = target_date.strftime("%a %b %-d")
+
+    display_date_str = target_date.strftime("%A, %B %-d, %Y")   # Monday, April 6, 2026
+    iso_date         = target_date.strftime("%Y-%m-%d")          # 2026-04-06
+    picker_date      = target_date.strftime("%m/%d/%Y")          # 04/06/2026 — for custom inputs
+
+    # Multiple patterns to verify the page is showing the right date
+    date_check_patterns = [
+        target_date.strftime("%a %b %-d"),  # Mon Apr 6
+        target_date.strftime("%b %-d"),     # Apr 6
+        target_date.strftime("%B %-d"),     # April 6
+    ]
+
+    # Days from today (floor to midnight for accurate diff)
+    today_date  = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    target_floor = target_date.replace(hour=0, minute=0, second=0, microsecond=0)
+    days_diff   = (target_floor - today_date).days
+
+    if days_diff < 0:
+        return {"status": "error", "message": f"Target date {display_date_str} is in the past."}
+    if days_diff > 7:
+        return {"status": "error", "message": f"Target date {display_date_str} is more than 7 days out. CourtReserve limit is 7 days."}
 
     target_h, target_m = None, None
     if target_time:
@@ -127,7 +139,7 @@ def book_pickleball_session(dry_run: bool = False, target_time: str = None, targ
             target_h, target_m = parsed
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True) 
+        browser = p.chromium.launch(headless=True)
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         )
@@ -135,6 +147,7 @@ def book_pickleball_session(dry_run: bool = False, target_time: str = None, targ
         page.set_default_timeout(30_000)
 
         try:
+            # ── Login ──────────────────────────────────────────────────────────
             page.goto(LOGIN_URL, wait_until="domcontentloaded")
             page.wait_for_timeout(2000)
 
@@ -149,62 +162,77 @@ def book_pickleball_session(dry_run: bool = False, target_time: str = None, targ
                 except Exception as e:
                     return {"status": "login_failed", "message": f"Login Error: {str(e)[:80]}"}
 
-            # Navigate using MM/DD/YYYY — the format CourtReserve datepickers expect
-            page.goto(f"{EVENTS_URL}?datepicker={picker_date}", wait_until="domcontentloaded")
+            # ── Navigate to Events List ────────────────────────────────────────
+            # This site uses a sidebar filter panel (Today/Tomorrow/This Week/Custom)
+            # NOT a datepicker URL param — navigate plain and use the radio buttons.
+            page.goto(EVENTS_URL, wait_until="networkidle")
             page.wait_for_timeout(2000)
 
             if page.locator("input[placeholder='Enter Your Email']").count() > 0:
                 return {"status": "error", "message": "Bounced back to login screen."}
 
-            # Verify the page is showing the right date; if not, set it via JS and Enter
-            date_nav_ok = False
+            # ── Apply date filter via sidebar radio buttons ────────────────────
             try:
-                date_input = page.locator("input#datepicker, input.datepicker").first
-                if date_input.count() > 0:
-                    current_val = date_input.input_value()
-                    if picker_date in current_val:
-                        date_nav_ok = True
-                    else:
-                        # Fill with MM/DD/YYYY and dispatch change event
-                        page.evaluate(f'''() => {{
-                            let el = document.querySelector('input#datepicker, input.datepicker');
-                            if (el) {{
-                                el.value = "{picker_date}";
-                                el.dispatchEvent(new Event('change', {{bubbles: true}}));
-                                el.dispatchEvent(new Event('input', {{bubbles: true}}));
-                            }}
-                        }}''')
-                        page.wait_for_timeout(500)
-                        date_input.press("Enter")
-                        page.wait_for_load_state("networkidle")
-                        page.wait_for_timeout(2000)
-                        final_val = date_input.input_value()
-                        if picker_date in final_val:
-                            date_nav_ok = True
-                        else:
-                            return {"status": "error", "message": f"Date navigation failed: page shows '{final_val}', expected '{picker_date}'. Cannot book without confirming the correct date."}
+                if days_diff == 0:
+                    page.get_by_text("Today", exact=True).click()
+                    page.wait_for_load_state("networkidle")
+                    page.wait_for_timeout(2000)
+
+                elif days_diff == 1:
+                    page.get_by_text("Tomorrow", exact=True).click()
+                    page.wait_for_load_state("networkidle")
+                    page.wait_for_timeout(2000)
+
                 else:
-                    # No datepicker input found — trust the URL param worked
-                    date_nav_ok = True
+                    # Click "Custom" to reveal date range inputs
+                    page.get_by_text("Custom", exact=True).click()
+                    page.wait_for_timeout(1500)
+
+                    if debug:
+                        snap = SKILL_DIR / f"debug_{iso_date}_after_custom_click.png"
+                        page.screenshot(path=str(snap), full_page=True)
+                        sys.stderr.write(f"[debug] after Custom click: {snap}\n")
+
+                    # Try multiple selector patterns for start/end date inputs
+                    custom_filled = False
+                    candidates = [
+                        ("input[id*='startDate' i], input[id*='start_date' i], input[name*='startDate' i]",
+                         "input[id*='endDate' i],   input[id*='end_date' i],   input[name*='endDate' i]"),
+                        ("input[placeholder*='Start' i], input[placeholder*='From' i]",
+                         "input[placeholder*='End' i],   input[placeholder*='To' i]"),
+                        ("input[type='date']:nth-of-type(1)", "input[type='date']:nth-of-type(2)"),
+                    ]
+                    for start_sel, end_sel in candidates:
+                        try:
+                            s = page.locator(start_sel).first
+                            e = page.locator(end_sel).first
+                            if s.count() > 0 and e.count() > 0:
+                                s.fill(picker_date)
+                                e.fill(picker_date)
+                                e.press("Enter")
+                                custom_filled = True
+                                break
+                        except Exception:
+                            pass
+
+                    if not custom_filled:
+                        return {"status": "error", "message": f"Could not fill custom date inputs for {picker_date}. Run --debug to inspect the page after clicking Custom."}
+
+                    page.wait_for_load_state("networkidle")
+                    page.wait_for_timeout(2000)
+
             except Exception as e:
-                return {"status": "error", "message": f"Date navigation error: {str(e)[:100]}"}
+                return {"status": "error", "message": f"Date filter error: {str(e)[:100]}"}
 
             if debug:
                 debug_path = SKILL_DIR / f"debug_{iso_date}.png"
                 text_path  = SKILL_DIR / f"debug_{iso_date}.txt"
                 page.screenshot(path=str(debug_path), full_page=True)
                 text_path.write_text(page.inner_text("body"))
-                sys.stderr.write(f"[debug] screenshot: {debug_path}\n[debug] page text:  {text_path}\n")
-                try:
-                    date_input = page.locator("input#datepicker, input.datepicker").first
-                    val = date_input.input_value() if date_input.count() > 0 else "(not found)"
-                    sys.stderr.write(f"[debug] datepicker value: {val}\n")
-                    sys.stderr.write(f"[debug] card_date_str: {card_date_str}\n")
-                    sys.stderr.write(f"[debug] picker_date: {picker_date}\n")
-                except Exception:
-                    pass
+                sys.stderr.write(f"[debug] final screenshot: {debug_path}\n")
+                sys.stderr.write(f"[debug] days_diff: {days_diff}, date_check_patterns: {date_check_patterns}\n")
 
-            return _scan_and_book(page, display_date_str, card_date_str, dry_run=dry_run, target_h=target_h, target_m=target_m)
+            return _scan_and_book(page, display_date_str, date_check_patterns, dry_run=dry_run, target_h=target_h, target_m=target_m)
 
         except Exception as e:
             return {"status": "error", "message": f"Unexpected error: {str(e)[:120]}"}
@@ -212,15 +240,14 @@ def book_pickleball_session(dry_run: bool = False, target_time: str = None, targ
             browser.close()
 
 
-def _scan_and_book(page, target_date_str: str, card_date_str: str, dry_run: bool = False, target_h: int = None, target_m: int = None) -> dict:
+def _scan_and_book(page, target_date_str: str, date_check_patterns: list, dry_run: bool = False, target_h: int = None, target_m: int = None) -> dict:
     page.wait_for_timeout(2000)
 
-    # Verify the page is actually showing the target date before scanning.
-    # CourtReserve shows the date as a section header (e.g. "Mon Apr 6"), not inside
-    # each card — so this is a page-level check, not a per-card filter.
+    # Verify the page is showing the target date (any format pattern suffices)
     page_body = page.inner_text("body")
-    if card_date_str.lower() not in page_body.lower():
-        return {"status": "error", "message": f"Page does not appear to show sessions for {card_date_str} ({target_date_str}). Date navigation may have failed."}
+    page_body_lower = page_body.lower()
+    if not any(p.lower() in page_body_lower for p in date_check_patterns):
+        return {"status": "error", "message": f"Page does not show sessions for {target_date_str}. Checked patterns: {date_check_patterns}. Run --debug to inspect."}
 
     reg_buttons = page.locator(
         "button:has-text('Register'), a:has-text('Register'), "
