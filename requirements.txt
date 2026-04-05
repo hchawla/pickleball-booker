@@ -1,5 +1,0 @@
-# Requirements for Pickleball Haven Booker Standalone Skill
-
-playwright>=1.40.0
-python-dotenv>=1.0.0
-keyring>=24.0.0
