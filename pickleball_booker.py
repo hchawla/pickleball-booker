@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-pickleball_booker.py — CourtReserve AM Open Play Booker
+pickleball_booker.py — CourtReserve Open Play Booker
 Pickleball Haven Lake Forest (site ID 13464)
+
+Supports AM, PM, and Full Day membership tiers.
+Set MEMBERSHIP_TYPE in .env (AM, PM, or FULL). Defaults to AM.
 """
 
 from __future__ import annotations
@@ -11,6 +14,7 @@ import json
 import os
 import re
 import sys
+from collections import namedtuple
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -19,12 +23,35 @@ from pathlib import Path
 SKILL_DIR = Path(__file__).parent
 ENV_PATH  = SKILL_DIR / ".env"
 
+def _parse_env_file() -> None:
+    """Parse .env file into os.environ. Does NOT overwrite existing keys."""
+    if not ENV_PATH.exists():
+        return
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(ENV_PATH, override=False)
+    except ImportError:
+        with open(ENV_PATH) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                key = key.strip()
+                val = val.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = val
+
+
 def _load_env() -> None:
     """
-    Priority:
-    1. System environment (already set)
-    2. macOS Keychain (via keyring)
-    3. .env file fallback
+    Precedence (highest wins):
+      1. System environment variables (already set)
+      2. macOS Keychain (via keyring) — sets env vars, won't overwrite existing
+      3. .env file — fills in anything still missing (e.g. MEMBERSHIP_TYPE)
+
+    The .env parse always runs so non-credential config like MEMBERSHIP_TYPE
+    is loaded even when credentials come from Keychain.
     """
     # 1. Try Keychain if keyring is available
     try:
@@ -32,37 +59,35 @@ def _load_env() -> None:
         service = "openclaw-pickleball-booker"
         email = keyring.get_password(service, "courtreserve-email")
         password = keyring.get_password(service, "courtreserve-pass")
-        if email: os.environ["COURTRESERVE_EMAIL"] = email
-        if password: os.environ["COURTRESERVE_PASS"] = password
+        if email and "COURTRESERVE_EMAIL" not in os.environ:
+            os.environ["COURTRESERVE_EMAIL"] = email
+        if password and "COURTRESERVE_PASS" not in os.environ:
+            os.environ["COURTRESERVE_PASS"] = password
     except Exception:
         pass
 
-    # 2. Try .env fallback if keys are still missing
-    if not os.environ.get("COURTRESERVE_EMAIL") or not os.environ.get("COURTRESERVE_PASS"):
-        if ENV_PATH.exists():
-            try:
-                from dotenv import load_dotenv
-                load_dotenv(ENV_PATH)
-            except ImportError:
-                # Manual parse as last resort
-                with open(ENV_PATH) as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line or line.startswith("#") or "=" not in line:
-                            continue
-                        key, _, val = line.partition("=")
-                        key = key.strip()
-                        val = val.strip().strip('"').strip("'")
-                        if key and key not in os.environ:
-                            os.environ[key] = val
+    # 2. Always parse .env for non-credential config (e.g. MEMBERSHIP_TYPE)
+    _parse_env_file()
 
 _load_env()
 
 LOGIN_URL   = "https://app.courtreserve.com/Online/Account/LogIn/13464"
 EVENTS_URL  = "https://app.courtreserve.com/Online/Events/List/13464"
 
-MAX_START_H = 14   # sessions must start before 14:30 (2:30 PM)
-MAX_START_M = 30
+# ── Membership tier config ────────────────────────────────────────────────────
+
+TierWindow = namedtuple("TierWindow", ["start_hour", "start_min", "end_hour", "end_min"])
+
+# Time windows per membership tier (24-hour clock, inclusive both ends).
+# TODO: PM floor of 14:30 is assumed from AM cutoff — verify against
+#       Pickleball Haven membership docs or CourtReserve before shipping.
+TIER_RULES = {
+    "AM": TierWindow(start_hour=0, start_min=0, end_hour=14, end_min=30),
+    "PM": TierWindow(start_hour=14, start_min=30, end_hour=23, end_min=59),
+    # FULL has no entry — it skips time filtering entirely.
+}
+
+VALID_TIERS = {"AM", "PM", "FULL"}
 
 
 # ── Time helpers ───────────────────────────────────────────────────────────────
@@ -81,8 +106,12 @@ def _parse_start_time(time_str: str) -> tuple[int, int] | None:
         elif meridiem.startswith('A') and h == 12: h = 0
     return h, mn
 
-def _is_before_cutoff(h: int, m: int) -> bool:
-    return (h, m) < (MAX_START_H, MAX_START_M)
+def _is_within_tier_window(h: int, m: int, tier: str) -> bool:
+    """Check if a session start time falls within the allowed window for this tier."""
+    if tier == "FULL":
+        return True  # No time restriction
+    rule = TIER_RULES[tier]
+    return (rule.start_hour, rule.start_min) <= (h, m) <= (rule.end_hour, rule.end_min)
 
 def _get_time_diff(h1: int, m1: int, h2: int, m2: int) -> int:
     return abs((h1 * 60 + m1) - (h2 * 60 + m2))
@@ -90,11 +119,28 @@ def _get_time_diff(h1: int, m1: int, h2: int, m2: int) -> int:
 
 # ── Main entry point ───────────────────────────────────────────────────────────
 
+def _tier_window_label(tier: str) -> str:
+    """Human-readable label for a tier's time window, e.g. '2:30 PM - 11:59 PM'."""
+    if tier == "FULL":
+        return "all day"
+    rule = TIER_RULES[tier]
+    def _fmt(h, m):
+        suffix = "AM" if h < 12 else "PM"
+        display_h = h % 12 or 12
+        return f"{display_h}:{m:02d} {suffix}"
+    return f"{_fmt(rule.start_hour, rule.start_min)} - {_fmt(rule.end_hour, rule.end_min)}"
+
+
 def book_pickleball_session(dry_run: bool = False, target_time: str = None, target_date_str: str = None, debug: bool = False) -> dict:
     try:
         from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
     except ImportError:
         return {"status": "error", "message": "playwright not installed"}
+
+    # Read membership tier after _load_env() has populated os.environ
+    membership_type = os.environ.get("MEMBERSHIP_TYPE", "AM").strip().upper()
+    if membership_type not in VALID_TIERS:
+        return {"status": "error", "message": f"MEMBERSHIP_TYPE '{membership_type}' is invalid. Use AM, PM, or FULL."}
 
     email    = os.environ.get("COURTRESERVE_EMAIL", "").strip()
     password = os.environ.get("COURTRESERVE_PASS", "").strip()
@@ -133,6 +179,11 @@ def book_pickleball_session(dry_run: bool = False, target_time: str = None, targ
         parsed = _parse_start_time(target_time)
         if parsed:
             target_h, target_m = parsed
+
+    # Pre-scan: catch tier/time conflicts before launching the browser
+    if target_h is not None and not _is_within_tier_window(target_h, target_m, membership_type):
+        window = _tier_window_label(membership_type)
+        return {"status": "error", "message": f"Your {membership_type} membership covers sessions {window}. {target_time} is outside your tier window."}
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -201,7 +252,7 @@ def book_pickleball_session(dry_run: bool = False, target_time: str = None, targ
                 dates_found = _re.findall(r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d+", body_text)
                 sys.stderr.write(f"[debug] dates on page: {list(dict.fromkeys(dates_found))[:10]}\n")
 
-            return _scan_and_book(page, display_date_str, card_date_str, dry_run=dry_run, target_h=target_h, target_m=target_m)
+            return _scan_and_book(page, display_date_str, card_date_str, dry_run=dry_run, target_h=target_h, target_m=target_m, tier=membership_type)
 
         except Exception as e:
             return {"status": "error", "message": f"Unexpected error: {str(e)[:120]}"}
@@ -209,7 +260,7 @@ def book_pickleball_session(dry_run: bool = False, target_time: str = None, targ
             browser.close()
 
 
-def _scan_and_book(page, target_date_str: str, card_date_str: str, dry_run: bool = False, target_h: int = None, target_m: int = None) -> dict:
+def _scan_and_book(page, target_date_str: str, card_date_str: str, dry_run: bool = False, target_h: int = None, target_m: int = None, tier: str = "AM") -> dict:
     page.wait_for_timeout(2000)
 
     # Verify the target date appears somewhere on the page before scanning
@@ -264,7 +315,7 @@ def _scan_and_book(page, target_date_str: str, card_date_str: str, dry_run: bool
         if not parsed: continue
         h, m = parsed
 
-        if not _is_before_cutoff(h, m): continue
+        if not _is_within_tier_window(h, m, tier): continue
 
         if target_h is not None and target_m is not None:
             diff_mins = _get_time_diff(h, m, target_h, target_m)
@@ -295,7 +346,8 @@ def _scan_and_book(page, target_date_str: str, card_date_str: str, dry_run: bool
         })
 
     if not qualifying_sessions:
-        return {"status": "none_available", "message": "No FREE AM Open Play found."}
+        window = _tier_window_label(tier)
+        return {"status": "none_available", "message": f"No free Open Play sessions found for your {tier} membership ({window}) on {target_date_str}."}
 
     if target_h is not None and target_m is not None:
         qualifying_sessions.sort(key=lambda s: (_get_time_diff(s["start_h"], s["start_m"], target_h, target_m), s["start_h"], s["start_m"]))
