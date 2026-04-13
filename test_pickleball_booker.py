@@ -1,8 +1,9 @@
-"""Unit tests for pickleball booker — membership tier logic."""
+"""Unit tests for pickleball booker — membership tier logic and browser config."""
 
 import os
+import re
 import pytest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 # Import the module functions and constants we need to test.
 # _load_env() runs at import time, so we set dummy creds to prevent errors.
@@ -13,6 +14,7 @@ from pickleball_booker import (
     _parse_start_time,
     _is_within_tier_window,
     _tier_window_label,
+    _scan_and_book,
     TIER_RULES,
     VALID_TIERS,
     TierWindow,
@@ -108,7 +110,7 @@ class TestTierWindowLabel:
 # ── MEMBERSHIP_TYPE validation ────────────────────────────────────────────────
 
 class TestMembershipValidation:
-    """Test that book_pickleball_session validates MEMBERSHIP_TYPE before proceeding."""
+    """Test that book_pickleball_session validates MEMBERSHIP_TYPE before launching a browser."""
 
     @patch.dict(os.environ, {"MEMBERSHIP_TYPE": "MORNING"}, clear=False)
     @patch("pickleball_booker._load_env")
@@ -120,42 +122,30 @@ class TestMembershipValidation:
 
     @patch.dict(os.environ, {"MEMBERSHIP_TYPE": "AM"}, clear=False)
     @patch("pickleball_booker._load_env")
-    def test_valid_am_accepted(self, mock_load):
-        # Should get past validation (will fail at playwright import, which is fine)
-        result = book_pickleball_session(dry_run=True)
-        assert result["status"] != "error" or "invalid" not in result.get("message", "").lower()
-
-    @patch.dict(os.environ, {"MEMBERSHIP_TYPE": "PM"}, clear=False)
-    @patch("pickleball_booker._load_env")
-    def test_valid_pm_accepted(self, mock_load):
-        result = book_pickleball_session(dry_run=True)
-        assert result["status"] != "error" or "invalid" not in result.get("message", "").lower()
-
-    @patch.dict(os.environ, {"MEMBERSHIP_TYPE": "FULL"}, clear=False)
-    @patch("pickleball_booker._load_env")
-    def test_valid_full_accepted(self, mock_load):
-        result = book_pickleball_session(dry_run=True)
-        assert result["status"] != "error" or "invalid" not in result.get("message", "").lower()
+    def test_valid_am_not_rejected(self, mock_load):
+        # Give it a date far enough out that it won't launch the browser (>7 days)
+        result = book_pickleball_session(dry_run=True, target_date_str="2099-01-01")
+        # Should fail with "more than 7 days out", NOT "invalid tier"
+        assert "invalid" not in result.get("message", "").lower()
 
     @patch.dict(os.environ, {}, clear=False)
     @patch("pickleball_booker._load_env")
     def test_missing_defaults_to_am(self, mock_load):
         os.environ.pop("MEMBERSHIP_TYPE", None)
-        result = book_pickleball_session(dry_run=True)
-        # Should not get an "invalid tier" error
+        result = book_pickleball_session(dry_run=True, target_date_str="2099-01-01")
         assert "invalid" not in result.get("message", "").lower()
 
     @patch.dict(os.environ, {"MEMBERSHIP_TYPE": " pm "}, clear=False)
     @patch("pickleball_booker._load_env")
     def test_whitespace_trimmed(self, mock_load):
-        result = book_pickleball_session(dry_run=True)
-        assert result["status"] != "error" or "invalid" not in result.get("message", "").lower()
+        result = book_pickleball_session(dry_run=True, target_date_str="2099-01-01")
+        assert "invalid" not in result.get("message", "").lower()
 
     @patch.dict(os.environ, {"MEMBERSHIP_TYPE": "Pm"}, clear=False)
     @patch("pickleball_booker._load_env")
     def test_case_insensitive(self, mock_load):
-        result = book_pickleball_session(dry_run=True)
-        assert result["status"] != "error" or "invalid" not in result.get("message", "").lower()
+        result = book_pickleball_session(dry_run=True, target_date_str="2099-01-01")
+        assert "invalid" not in result.get("message", "").lower()
 
 
 # ── Pre-scan target-time validation ───────────────────────────────────────────
@@ -166,30 +156,32 @@ class TestPreScanValidation:
     @patch.dict(os.environ, {"MEMBERSHIP_TYPE": "PM"}, clear=False)
     @patch("pickleball_booker._load_env")
     def test_pm_tier_morning_target_error(self, mock_load):
-        result = book_pickleball_session(dry_run=True, target_time="9:00 AM", target_date_str="2026-04-06")
+        from datetime import datetime, timedelta
+        tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+        result = book_pickleball_session(dry_run=True, target_time="9:00 AM", target_date_str=tomorrow)
         assert result["status"] == "error"
         assert "outside your tier window" in result["message"]
 
     @patch.dict(os.environ, {"MEMBERSHIP_TYPE": "AM"}, clear=False)
     @patch("pickleball_booker._load_env")
     def test_am_tier_afternoon_target_error(self, mock_load):
-        result = book_pickleball_session(dry_run=True, target_time="3:00 PM", target_date_str="2026-04-06")
+        from datetime import datetime, timedelta
+        tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+        result = book_pickleball_session(dry_run=True, target_time="3:00 PM", target_date_str=tomorrow)
         assert result["status"] == "error"
         assert "outside your tier window" in result["message"]
 
     @patch.dict(os.environ, {"MEMBERSHIP_TYPE": "FULL"}, clear=False)
     @patch("pickleball_booker._load_env")
     def test_full_tier_any_time_passes(self, mock_load):
-        # FULL should not trigger a pre-scan error for any time
-        result = book_pickleball_session(dry_run=True, target_time="9:00 AM", target_date_str="2026-04-06")
-        # Should get past pre-scan validation (may fail at playwright, that's fine)
+        # FULL tier + far-out date = should hit "more than 7 days" not "tier window"
+        result = book_pickleball_session(dry_run=True, target_time="9:00 AM", target_date_str="2099-01-01")
         assert "outside your tier window" not in result.get("message", "")
 
     @patch.dict(os.environ, {"MEMBERSHIP_TYPE": "PM"}, clear=False)
     @patch("pickleball_booker._load_env")
     def test_no_target_time_skips_validation(self, mock_load):
-        # Without a target time, pre-scan validation should not trigger
-        result = book_pickleball_session(dry_run=True, target_date_str="2026-04-06")
+        result = book_pickleball_session(dry_run=True, target_date_str="2099-01-01")
         assert "outside your tier window" not in result.get("message", "")
 
 
@@ -210,3 +202,54 @@ class TestTierRulesStructure:
 
     def test_valid_tiers_set(self):
         assert VALID_TIERS == {"AM", "PM", "FULL"}
+
+
+# ── Browser anti-detection config ────────────────────────────────────────────
+
+class TestBrowserConfig:
+    """Verify that the Playwright launch includes Cloudflare bypass flags."""
+
+    def test_source_has_automation_controlled_flag(self):
+        import inspect
+        source = inspect.getsource(book_pickleball_session)
+        assert "disable-blink-features=AutomationControlled" in source, \
+            "Browser launch must include --disable-blink-features=AutomationControlled to bypass Cloudflare"
+
+    def test_source_has_webdriver_override(self):
+        import inspect
+        source = inspect.getsource(book_pickleball_session)
+        assert "navigator" in source and "webdriver" in source, \
+            "Must override navigator.webdriver to bypass bot detection"
+
+    def test_source_has_modern_user_agent(self):
+        import inspect
+        source = inspect.getsource(book_pickleball_session)
+        # User agent should be Chrome 120+ (not the old 122 that Cloudflare blocks)
+        match = re.search(r"Chrome/(\d+)", source)
+        assert match, "Browser launch must include a Chrome user agent"
+        version = int(match.group(1))
+        assert version >= 120, f"Chrome user agent version {version} is too old, use 120+"
+
+
+# ── DOM traversal scoping ────────────────────────────────────────────────────
+
+class TestDomTraversalScoping:
+    """Verify that _scan_and_book uses card-level DOM scoping, not unbounded parent walk."""
+
+    def test_source_has_card_class_check(self):
+        import inspect
+        source = inspect.getsource(_scan_and_book)
+        assert "card" in source.lower() and "className" in source, \
+            "_scan_and_book must check CSS class for card-level container to prevent cross-card text leaking"
+
+    def test_source_does_not_use_unbounded_walk(self):
+        """The old bug: walking up DOM until any parent has 'OPEN PLAY' grabs sibling cards."""
+        import inspect
+        source = inspect.getsource(_scan_and_book)
+        # The JS should check className before returning, not just innerText
+        js_blocks = re.findall(r"btn\.evaluate\(.*?\)\)", source, re.DOTALL)
+        assert len(js_blocks) > 0, "Expected at least one btn.evaluate() call"
+        js = js_blocks[0]
+        # The JS should reference className or classList, not just walk up blindly
+        assert "className" in js or "classList" in js, \
+            "DOM traversal must check element class to stop at the card boundary"

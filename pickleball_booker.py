@@ -186,11 +186,19 @@ def book_pickleball_session(dry_run: bool = False, target_time: str = None, targ
         return {"status": "error", "message": f"Your {membership_type} membership covers sessions {window}. {target_time} is outside your tier window."}
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+            ],
+        )
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            viewport={"width": 1920, "height": 1080},
         )
         page = context.new_page()
+        page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         page.set_default_timeout(30_000)
 
         try:
@@ -284,8 +292,16 @@ def _scan_and_book(page, target_date_str: str, card_date_str: str, dry_run: bool
             let node = el;
             while(node && node.parentElement) {
                 node = node.parentElement;
-                let txt = node.innerText || "";
-                if (txt.toUpperCase().includes('OPEN PLAY')) return txt;
+                // Stop at the nearest card-level container (Bootstrap card or
+                // CourtReserve event wrapper). This prevents grabbing text from
+                // sibling event cards that happen to share a grandparent.
+                let cls = (node.className || "").toLowerCase();
+                if (cls.includes("card") || cls.includes("event-item") ||
+                    cls.includes("panel") || cls.includes("list-group-item") ||
+                    (node.tagName === "DIV" && node.getAttribute("data-event-id"))) {
+                    let txt = node.innerText || "";
+                    if (txt.toUpperCase().includes("OPEN PLAY")) return txt;
+                }
             }
             return "";
         }''')
