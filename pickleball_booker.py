@@ -71,6 +71,21 @@ def _load_env() -> None:
 
 _load_env()
 
+
+def _log_internal(reason: str, detail: str = "") -> None:
+    """Write technical error detail to stderr only — never user-visible.
+
+    The user-facing `message` field in returned dicts must stay clean of
+    Python exception text, stack frames, or internal diagnostic strings.
+    Anything we want preserved for post-mortem (cron logs, --debug runs)
+    goes here.
+    """
+    if detail:
+        sys.stderr.write(f"[pickleball_booker] {reason}: {detail}\n")
+    else:
+        sys.stderr.write(f"[pickleball_booker] {reason}\n")
+
+
 LOGIN_URL   = "https://app.courtreserve.com/Online/Account/LogIn/13464"
 EVENTS_URL  = "https://app.courtreserve.com/Online/Events/List/13464"
 
@@ -88,6 +103,14 @@ TIER_RULES = {
 }
 
 VALID_TIERS = {"AM", "PM", "FULL"}
+
+# Options for the site's required "Self-Rated Level" registration field
+# (a Kendo DropDownList UDF, id="_0__Udfs_0_Value"). Values must match the
+# site's dataSource exactly — confirmed from a live registration form snapshot.
+VALID_SKILL_LEVELS = {
+    "New to PB", "2.0 - 2.5", "2.5 to 3.0", "3.0 to 3.5",
+    "3.5 to 4.0", "4.0+", "Here for the Vibe!",
+}
 
 
 # ── Time helpers ───────────────────────────────────────────────────────────────
@@ -147,6 +170,14 @@ def book_pickleball_session(dry_run: bool = False, target_time: str = None, targ
 
     if not email or not password:
         return {"status": "error", "message": "COURTRESERVE_EMAIL / COURTRESERVE_PASS not set"}
+
+    # The registration form requires a "Self-Rated Level" selection (site-side
+    # validation blocks Finalize without it — this is what caused every past
+    # "uncertain" result). Fail fast rather than let every booking attempt
+    # bounce off that validation error.
+    self_rated_level = os.environ.get("SELF_RATED_LEVEL", "").strip()
+    if self_rated_level not in VALID_SKILL_LEVELS:
+        return {"status": "error", "message": f"SELF_RATED_LEVEL not set to a valid option. Use one of: {', '.join(sorted(VALID_SKILL_LEVELS))}."}
 
     # Determine target date
     if target_date_str:
@@ -215,7 +246,8 @@ def book_pickleball_session(dry_run: bool = False, target_time: str = None, targ
                     email_field.first.wait_for(state="hidden", timeout=15000)
                     page.wait_for_load_state("networkidle")
                 except Exception as e:
-                    return {"status": "login_failed", "message": f"Login Error: {str(e)[:80]}"}
+                    _log_internal("login step failed", f"{type(e).__name__}: {str(e)[:200]}")
+                    return {"status": "login_failed", "message": "Couldn't log in to CourtReserve. Credentials may have changed."}
 
             # ── Navigate to Events List ────────────────────────────────────────
             # This site uses a sidebar filter panel (Today/Tomorrow/This Week/Custom)
@@ -224,17 +256,18 @@ def book_pickleball_session(dry_run: bool = False, target_time: str = None, targ
             page.wait_for_timeout(2000)
 
             if page.locator("input[placeholder='Enter Your Email']").count() > 0:
-                return {"status": "error", "message": "Bounced back to login screen."}
+                _log_internal("session bounced back to login screen after navigating to events list")
+                return {"status": "login_failed", "message": "Couldn't stay logged in to CourtReserve. Try again."}
 
             # ── Apply date filter via sidebar radio buttons ────────────────────
             try:
                 if days_diff == 0:
-                    page.get_by_text("Today", exact=True).click()
+                    page.get_by_text("Today", exact=True).first.click()
                     page.wait_for_load_state("networkidle")
                     page.wait_for_timeout(2000)
 
                 elif days_diff == 1:
-                    page.get_by_text("Tomorrow", exact=True).click()
+                    page.get_by_text("Tomorrow", exact=True).first.click()
                     page.wait_for_load_state("networkidle")
                     page.wait_for_timeout(2000)
 
@@ -245,7 +278,8 @@ def book_pickleball_session(dry_run: bool = False, target_time: str = None, targ
                     page.wait_for_timeout(3000)
 
             except Exception as e:
-                return {"status": "error", "message": f"Date filter error: {str(e)[:100]}"}
+                _log_internal("date filter click failed", f"{type(e).__name__}: {str(e)[:200]}")
+                return {"status": "error", "message": "Couldn't load sessions for that date. Try again."}
 
             if debug:
                 debug_path = SKILL_DIR / f"debug_{iso_date}.png"
@@ -260,15 +294,16 @@ def book_pickleball_session(dry_run: bool = False, target_time: str = None, targ
                 dates_found = _re.findall(r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d+", body_text)
                 sys.stderr.write(f"[debug] dates on page: {list(dict.fromkeys(dates_found))[:10]}\n")
 
-            return _scan_and_book(page, display_date_str, card_date_str, dry_run=dry_run, target_h=target_h, target_m=target_m, tier=membership_type)
+            return _scan_and_book(page, display_date_str, card_date_str, dry_run=dry_run, target_h=target_h, target_m=target_m, tier=membership_type, self_rated_level=self_rated_level)
 
         except Exception as e:
-            return {"status": "error", "message": f"Unexpected error: {str(e)[:120]}"}
+            _log_internal("unexpected exception inside browser session", f"{type(e).__name__}: {str(e)[:200]}")
+            return {"status": "error", "message": "Booking site behaved unexpectedly. Try again."}
         finally:
             browser.close()
 
 
-def _scan_and_book(page, target_date_str: str, card_date_str: str, dry_run: bool = False, target_h: int = None, target_m: int = None, tier: str = "AM") -> dict:
+def _scan_and_book(page, target_date_str: str, card_date_str: str, dry_run: bool = False, target_h: int = None, target_m: int = None, tier: str = "AM", self_rated_level: str = "") -> dict:
     page.wait_for_timeout(2000)
 
     # Verify the target date appears somewhere on the page before scanning
@@ -343,9 +378,9 @@ def _scan_and_book(page, target_date_str: str, card_date_str: str, dry_run: bool
         is_free = any(line.upper() == 'FREE' for line in lines)
         
         if not is_free:
-            for line in reversed(lines): 
-                m_fee = re.search(r"^\$?(\d+(?:\.\d{2})?)", line)
-                if m_fee and len(line) < 15:
+            for line in reversed(lines):
+                m_fee = re.fullmatch(r"\$?(\d+(?:\.\d{2})?)", line)
+                if m_fee:
                     fee_cents = int(float(m_fee.group(1)) * 100)
                     break
 
@@ -370,38 +405,40 @@ def _scan_and_book(page, target_date_str: str, card_date_str: str, dry_run: bool
     else:
         qualifying_sessions.sort(key=lambda s: (s["start_h"], s["start_m"]))
 
-    already_booked = [s for s in qualifying_sessions if s["already_booked"]]
-    if already_booked:
-        return {"status": "already_booked", "time": already_booked[0]["time_str"], "date": target_date_str}
-
-    target = qualifying_sessions[0]
-
     if dry_run:
         return {
             "status": "dry_run",
-            "sessions": [{"time": s["time_str"]} for s in qualifying_sessions],
+            "sessions": [{"time": s["time_str"], "already_booked": s["already_booked"]} for s in qualifying_sessions],
             "date": target_date_str,
         }
 
-    return _register_session(page, target, target_date_str)
+    unbooked_sessions = [s for s in qualifying_sessions if not s["already_booked"]]
+    if not unbooked_sessions:
+        return {"status": "already_booked", "time": qualifying_sessions[0]["time_str"], "date": target_date_str}
+
+    target = unbooked_sessions[0]
+
+    return _register_session(page, target, target_date_str, self_rated_level)
 
 
-def _register_session(page, session: dict, target_date_str: str) -> dict:
+def _register_session(page, session: dict, target_date_str: str, self_rated_level: str = "") -> dict:
     from playwright.sync_api import TimeoutError as PlaywrightTimeout
     first_btn = session.get("element")
     time_display = session["time_str"]
 
     if first_btn is None:
-        return {"status": "error", "message": "Element lost during scan"}
+        _log_internal("registration button reference was lost between scan and click")
+        return {"status": "error", "message": "Booking site changed mid-scan. Try again."}
 
     try:
         first_btn.scroll_into_view_if_needed()
         page.wait_for_timeout(500)
-        first_btn.click(force=True) 
-        page.wait_for_timeout(3000) 
-        
+        first_btn.click(force=True)
+        page.wait_for_timeout(3000)
+
     except Exception as e:
-        return {"status": "error", "message": f"Step 1 failed: {str(e)[:50]}"}
+        _log_internal("could not open the registration form", f"{type(e).__name__}: {str(e)[:200]}")
+        return {"status": "error", "message": "Couldn't open the registration form. Try again."}
 
     second_clicked = False
     finalize_clicked = False
@@ -416,12 +453,30 @@ def _register_session(page, session: dict, target_date_str: str) -> dict:
         }''')
         page.wait_for_timeout(500)
 
+        # Required "Self-Rated Level" field (Kendo DropDownList UDF). The site
+        # blocks Finalize with a validation error if this isn't set — this was
+        # the actual cause of every past "uncertain" result.
+        level_set = page.evaluate('''(level) => {
+            if (typeof jQuery === "undefined") return "no-jquery";
+            var $el = jQuery("#_0__Udfs_0_Value");
+            if ($el.length === 0) return "not-present";
+            var widget = $el.data("kendoDropDownList");
+            if (!widget) return "no-widget";
+            widget.value(level);
+            widget.trigger("change");
+            return "set";
+        }''', self_rated_level)
+        if level_set != "set":
+            _log_internal("self-rated level field not set", level_set)
+        page.wait_for_timeout(500)
+
         second_clicked = page.evaluate('''() => {
             let elements = Array.from(document.querySelectorAll('button, input[type="submit"], input[type="button"], a.btn'));
             let visibleTargets = elements.filter(el => {
                 let text = (el.innerText || el.value || "").toUpperCase();
-                let isVisible = el.offsetParent !== null; 
-                return isVisible && (text.includes("REGISTER") || text.includes("SAVE") || text.includes("CONFIRM"));
+                let isVisible = el.offsetParent !== null;
+                let isFinalizeButton = text.includes("FINALIZE") || text.includes("COMPLETE") || text.includes("CHECK OUT");
+                return isVisible && !isFinalizeButton && (text.includes("REGISTER") || text.includes("SAVE") || text.includes("CONFIRM"));
             });
 
             if (visibleTargets.length > 0) {
@@ -451,36 +506,79 @@ def _register_session(page, session: dict, target_date_str: str) -> dict:
             page.wait_for_load_state("networkidle")
             
     except Exception as e:
-        return {"status": "error", "message": f"JS Execution failed: {str(e)[:50]}"}
+        _log_internal("registration JS step failed", f"{type(e).__name__}: {str(e)[:200]}")
+        return {"status": "uncertain", "time": time_display, "date": target_date_str,
+                "message": "Booking form didn't respond. Please verify on CourtReserve."}
 
     page.wait_for_timeout(4000)
 
     page_text = page.inner_text("body").upper()
 
-    # Primary: explicit confirmation copy
+    # Primary: explicit confirmation copy.
     success_keywords = ["SUCCESS", "CONFIRMED", "MY BOOKINGS", "REGISTERED",
-                        "THANK YOU", "SPOT IS SAVED", "YOU ARE IN", "YOU'RE IN"]
+                        "THANK YOU", "SPOT IS SAVED", "YOU ARE IN", "YOU'RE IN",
+                        "REGISTRATION COMPLETE", "BOOKING SUMMARY", "ADDED TO YOUR RESERVATIONS",
+                        "VIEW MY RESERVATIONS", "RESERVATION CONFIRMED"]
     # Secondary: after a successful booking CourtReserve redirects back to the events
-    # list where your session now shows "Edit Registration" or "Withdraw" — both mean
-    # you are registered. "COMPLETE" alone is too generic so it's moved here.
-    post_redirect_keywords = ["EDIT REGISTRATION", "WITHDRAW", "COMPLETE"]
+    # list where your session now shows "Edit Registration" or "Withdraw" or "Cancel Registration" —
+    # all mean you are registered. "COMPLETE" alone is too generic so it's grouped here.
+    post_redirect_keywords = ["EDIT REGISTRATION", "WITHDRAW", "CANCEL REGISTRATION", "COMPLETE"]
 
     if any(word in page_text for word in success_keywords + post_redirect_keywords):
         return {"status": "booked", "time": time_display, "date": target_date_str}
 
     if second_clicked or finalize_clicked:
+        # Auto-capture the post-booking page when we can't classify it. Three consecutive
+        # `uncertain` returns (May 18/19/20 2026) all turned out to be successful bookings
+        # CourtReserve probably changed its post-booking markup. Snapshots let us patch the
+        # keyword list with concrete evidence instead of guessing.
+        try:
+            from datetime import datetime as _dt
+            ts = _dt.now().strftime("%Y-%m-%dT%H-%M-%S")
+            snap_dir = SKILL_DIR / "debug" / f"uncertain_{ts}"
+            snap_dir.mkdir(parents=True, exist_ok=True)
+            page.screenshot(path=str(snap_dir / "page.png"), full_page=True)
+            (snap_dir / "body.txt").write_text(page.inner_text("body"))
+            (snap_dir / "body.html").write_text(page.content())
+            (snap_dir / "url.txt").write_text(page.url)
+            _log_internal("uncertain snapshot saved", str(snap_dir))
+        except Exception as _snap_err:
+            _log_internal("uncertain snapshot failed", f"{type(_snap_err).__name__}: {str(_snap_err)[:200]}")
         return {"status": "uncertain", "time": time_display, "date": target_date_str,
                 "message": "Registration steps completed but no confirmation message detected. Please check CourtReserve to verify."}
 
-    return {"status": "error", "message": "No confirmation message found and no registration buttons were clicked."}
+    _log_internal("no confirmation keywords matched and no registration buttons were detected as clicked")
+    return {"status": "error", "message": "Booking didn't complete. Please verify on CourtReserve."}
 
 
-if __name__ == "__main__":
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point. Always emits a single line of JSON to stdout.
+
+    Top-level safety net: any exception that escapes book_pickleball_session
+    is converted to a user-facing error JSON; the traceback goes to stderr
+    only. The agent reading stdout never sees a Python exception, so it
+    cannot accidentally narrate one to the user.
+    """
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--date", type=str, help="Target date in YYYY-MM-DD format")
     parser.add_argument("--target-time", type=str)
     parser.add_argument("--debug", action="store_true", help="Save screenshot and page text for inspection")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
-    print(json.dumps(book_pickleball_session(args.dry_run, args.target_time, args.date, args.debug), indent=2))
+    try:
+        result = book_pickleball_session(args.dry_run, args.target_time, args.date, args.debug)
+        print(json.dumps(result))
+        return 0
+    except Exception:
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        print(json.dumps({
+            "status": "error",
+            "message": "Couldn't reach the booking site. Try again.",
+        }))
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

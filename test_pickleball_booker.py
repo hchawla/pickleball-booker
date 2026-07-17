@@ -1,5 +1,6 @@
 """Unit tests for pickleball booker — membership tier logic and browser config."""
 
+import json
 import os
 import re
 import pytest
@@ -253,3 +254,155 @@ class TestDomTraversalScoping:
         # The JS should reference className or classList, not just walk up blindly
         assert "className" in js or "classList" in js, \
             "DOM traversal must check element class to stop at the card boundary"
+
+
+# ── User-facing message hygiene ──────────────────────────────────────────────
+
+# The agent (especially small local models like gemma) treats the `message`
+# field in the script's stdout JSON as user-facing text and may relay it
+# verbatim to WhatsApp. So `message` must never contain Python exception
+# class names, "Error:" prefixes, file paths, or other technical leakage.
+# Internal diagnostic detail goes to stderr via _log_internal().
+
+_TECHNICAL_LEAKAGE_PATTERNS = [
+    "Traceback",
+    "Exception",
+    "TimeoutError",
+    "PlaywrightTimeout",
+    "AttributeError",
+    "TypeError",
+    "Error:",
+    "Step 1",
+    "JS Execution",
+    "Login Error",
+    "Date filter error",
+    "Unexpected error",
+    "/Users/",
+    "<class ",
+]
+
+
+def _assert_message_is_user_facing(message: str):
+    for pat in _TECHNICAL_LEAKAGE_PATTERNS:
+        assert pat not in message, \
+            f"User-facing message leaked technical detail '{pat}': {message!r}"
+
+
+class TestErrorMessageHygiene:
+    """Each error path must return a clean, user-facing message — no tracebacks,
+    no exception class names, no file paths, no 'Error:' prefixes. The agent
+    relays this verbatim, so leaks land in the user's WhatsApp."""
+
+    @patch.dict(os.environ, {"COURTRESERVE_EMAIL": "", "COURTRESERVE_PASS": ""}, clear=False)
+    @patch("pickleball_booker._load_env")
+    def test_missing_credentials_message_is_user_facing(self, mock_load):
+        result = book_pickleball_session(dry_run=True, target_date_str="2099-01-01")
+        assert result["status"] == "error"
+        _assert_message_is_user_facing(result["message"])
+
+    @patch.dict(os.environ, {"MEMBERSHIP_TYPE": "MORNING"}, clear=False)
+    @patch("pickleball_booker._load_env")
+    def test_invalid_tier_message_is_user_facing(self, mock_load):
+        result = book_pickleball_session(dry_run=True)
+        assert result["status"] == "error"
+        _assert_message_is_user_facing(result["message"])
+
+    @patch("pickleball_booker._load_env")
+    def test_invalid_date_format_message_is_user_facing(self, mock_load):
+        result = book_pickleball_session(dry_run=True, target_date_str="not-a-date")
+        assert result["status"] == "error"
+        _assert_message_is_user_facing(result["message"])
+
+    @patch("pickleball_booker._load_env")
+    def test_past_date_message_is_user_facing(self, mock_load):
+        result = book_pickleball_session(dry_run=True, target_date_str="2000-01-01")
+        assert result["status"] == "error"
+        _assert_message_is_user_facing(result["message"])
+
+    @patch("pickleball_booker._load_env")
+    def test_far_out_date_message_is_user_facing(self, mock_load):
+        result = book_pickleball_session(dry_run=True, target_date_str="2099-01-01")
+        assert result["status"] == "error"
+        _assert_message_is_user_facing(result["message"])
+
+    def test_source_has_no_raw_exception_in_user_message(self):
+        """Defensive source-level check: no return path should embed `str(e)`
+        into the user-facing `message` field. Internal detail goes to stderr
+        via _log_internal()."""
+        import inspect
+        import pickleball_booker as pb
+        # Check message strings inside book_pickleball_session,
+        # _scan_and_book, and _register_session
+        for fn in (pb.book_pickleball_session, pb._scan_and_book, pb._register_session):
+            source = inspect.getsource(fn)
+            # Pattern: "message": f"...{str(e)..."  or "message": f"...{e}..."
+            offenders = re.findall(r'"message":\s*f"[^"]*\{(?:str\()?e[^"]*"', source)
+            assert offenders == [], \
+                f"{fn.__name__} embeds raw exception text in user-facing message: {offenders}"
+
+
+class TestMainCrashSafety:
+    """The CLI entry point must never let a Python traceback escape to stdout.
+    Any uncaught exception inside book_pickleball_session must be converted
+    to a user-facing JSON error on stdout, with the traceback only on stderr."""
+
+    def test_main_returns_clean_json_on_uncaught_exception(self, monkeypatch, capsys):
+        import pickleball_booker as pb
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("simulated playwright/network/anything failure")
+
+        monkeypatch.setattr(pb, "book_pickleball_session", boom)
+
+        rv = pb.main(["--date", "2099-01-01"])
+        captured = capsys.readouterr()
+
+        assert rv == 1
+        # stdout must be exactly one line of JSON, parseable, status=error
+        stdout_lines = [l for l in captured.out.splitlines() if l.strip()]
+        assert len(stdout_lines) == 1, f"expected single JSON line, got {len(stdout_lines)}: {captured.out!r}"
+        parsed = json.loads(stdout_lines[0])
+        assert parsed["status"] == "error"
+        _assert_message_is_user_facing(parsed["message"])
+
+        # stderr should carry the traceback for post-mortem
+        assert "Traceback" in captured.err
+        assert "RuntimeError" in captured.err
+        assert "simulated" in captured.err
+
+    def test_main_normal_path_returns_zero(self, monkeypatch, capsys):
+        import pickleball_booker as pb
+
+        def fake(*args, **kwargs):
+            return {"status": "dry_run", "sessions": [{"time": "9a-12p"}], "date": "Mon, Apr 6, 2026"}
+
+        monkeypatch.setattr(pb, "book_pickleball_session", fake)
+        rv = pb.main(["--dry-run", "--date", "2026-04-06"])
+        captured = capsys.readouterr()
+
+        assert rv == 0
+        stdout_lines = [l for l in captured.out.splitlines() if l.strip()]
+        assert len(stdout_lines) == 1
+        parsed = json.loads(stdout_lines[0])
+        assert parsed["status"] == "dry_run"
+
+
+class TestStdoutContract:
+    """The stdout contract: a single line of JSON, terminated by a newline.
+    The agent's invocation pattern parses stdout — multi-line or malformed
+    output breaks the contract."""
+
+    def test_main_emits_single_line_no_indent(self, monkeypatch, capsys):
+        import pickleball_booker as pb
+
+        result = {"status": "booked", "time": "9a-12p", "date": "Mon, Apr 6, 2026"}
+        monkeypatch.setattr(pb, "book_pickleball_session", lambda *a, **kw: result)
+
+        pb.main(["--date", "2026-04-06"])
+        out = capsys.readouterr().out
+
+        # Exactly one newline at end, exactly one line of content, no \n inside
+        assert out.endswith("\n")
+        assert out.count("\n") == 1, f"expected single-line output, got: {out!r}"
+        parsed = json.loads(out)
+        assert parsed == result

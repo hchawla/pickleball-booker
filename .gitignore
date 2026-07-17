@@ -8,3 +8,6 @@ venv/
 .env
 .DS_Store
 *.png
+debug_*.txt
+debug/
+preferences.json
