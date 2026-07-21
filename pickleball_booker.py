@@ -15,7 +15,7 @@ import os
 import re
 import sys
 from collections import namedtuple
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 # ── Load environment ───────────────────────────────────────────────────────────
@@ -235,7 +235,14 @@ def book_pickleball_session(dry_run: bool = False, target_time: str = None, targ
         try:
             # ── Login ──────────────────────────────────────────────────────────
             page.goto(LOGIN_URL, wait_until="domcontentloaded")
-            page.wait_for_timeout(2000)
+            try:
+                page.wait_for_selector(
+                    "input[placeholder='Enter Your Email'], input[type='email'], "
+                    "input[placeholder='Enter Your Password'], input[type='password']",
+                    timeout=2000,
+                )
+            except PlaywrightTimeout:
+                pass
 
             email_field = page.locator("input[placeholder='Enter Your Email'], input[type='email']")
             if email_field.count() > 0:
@@ -253,7 +260,14 @@ def book_pickleball_session(dry_run: bool = False, target_time: str = None, targ
             # This site uses a sidebar filter panel (Today/Tomorrow/This Week/Custom)
             # NOT a datepicker URL param — navigate plain and use the radio buttons.
             page.goto(EVENTS_URL, wait_until="networkidle")
-            page.wait_for_timeout(2000)
+            try:
+                page.wait_for_selector(
+                    "button:has-text('Register'), a:has-text('Register'), "
+                    "input[placeholder='Enter Your Email']",
+                    timeout=2000,
+                )
+            except PlaywrightTimeout:
+                pass
 
             if page.locator("input[placeholder='Enter Your Email']").count() > 0:
                 _log_internal("session bounced back to login screen after navigating to events list")
@@ -264,18 +278,39 @@ def book_pickleball_session(dry_run: bool = False, target_time: str = None, targ
                 if days_diff == 0:
                     page.get_by_text("Today", exact=True).first.click()
                     page.wait_for_load_state("networkidle")
-                    page.wait_for_timeout(2000)
+                    try:
+                        page.wait_for_selector(
+                            "button:has-text('Register'), a:has-text('Register'), "
+                            "button:has-text('Edit Registration'), a:has-text('Edit Registration')",
+                            timeout=2000,
+                        )
+                    except PlaywrightTimeout:
+                        pass
 
                 elif days_diff == 1:
                     page.get_by_text("Tomorrow", exact=True).first.click()
                     page.wait_for_load_state("networkidle")
-                    page.wait_for_timeout(2000)
+                    try:
+                        page.wait_for_selector(
+                            "button:has-text('Register'), a:has-text('Register'), "
+                            "button:has-text('Edit Registration'), a:has-text('Edit Registration')",
+                            timeout=2000,
+                        )
+                    except PlaywrightTimeout:
+                        pass
 
                 else:
                     # For dates 2-7 days out, the default page load already shows
                     # ~10 days of sessions. Per-card date filtering in _scan_and_book
                     # (using card_date_str = "Apr 6") scopes results to the target day.
-                    page.wait_for_timeout(3000)
+                    try:
+                        page.wait_for_selector(
+                            "button:has-text('Register'), a:has-text('Register'), "
+                            "button:has-text('Edit Registration'), a:has-text('Edit Registration')",
+                            timeout=3000,
+                        )
+                    except PlaywrightTimeout:
+                        pass
 
             except Exception as e:
                 _log_internal("date filter click failed", f"{type(e).__name__}: {str(e)[:200]}")
@@ -290,8 +325,7 @@ def book_pickleball_session(dry_run: bool = False, target_time: str = None, targ
                 sys.stderr.write(f"[debug] final screenshot: {debug_path}\n")
                 sys.stderr.write(f"[debug] days_diff: {days_diff}, card_date_str: {card_date_str}\n")
                 # Show first dates mentioned so we can confirm target date is present
-                import re as _re
-                dates_found = _re.findall(r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d+", body_text)
+                dates_found = re.findall(r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d+", body_text)
                 sys.stderr.write(f"[debug] dates on page: {list(dict.fromkeys(dates_found))[:10]}\n")
 
             return _scan_and_book(page, display_date_str, card_date_str, dry_run=dry_run, target_h=target_h, target_m=target_m, tier=membership_type, self_rated_level=self_rated_level)
@@ -304,7 +338,15 @@ def book_pickleball_session(dry_run: bool = False, target_time: str = None, targ
 
 
 def _scan_and_book(page, target_date_str: str, card_date_str: str, dry_run: bool = False, target_h: int = None, target_m: int = None, tier: str = "AM", self_rated_level: str = "") -> dict:
-    page.wait_for_timeout(2000)
+    from playwright.sync_api import TimeoutError as PlaywrightTimeout
+    try:
+        page.wait_for_selector(
+            "button:has-text('Register'), a:has-text('Register'), "
+            "button:has-text('Edit Registration'), a:has-text('Edit Registration')",
+            timeout=2000,
+        )
+    except PlaywrightTimeout:
+        pass
 
     # Verify the target date appears somewhere on the page before scanning
     page_body = page.inner_text("body")
@@ -434,7 +476,10 @@ def _register_session(page, session: dict, target_date_str: str, self_rated_leve
         first_btn.scroll_into_view_if_needed()
         page.wait_for_timeout(500)
         first_btn.click(force=True)
-        page.wait_for_timeout(3000)
+        try:
+            page.wait_for_selector("input[type='checkbox'], #_0__Udfs_0_Value", timeout=3000)
+        except PlaywrightTimeout:
+            pass
 
     except Exception as e:
         _log_internal("could not open the registration form", f"{type(e).__name__}: {str(e)[:200]}")
@@ -487,7 +532,14 @@ def _register_session(page, session: dict, target_date_str: str, self_rated_leve
         }''')
 
         if second_clicked:
-            page.wait_for_timeout(3000) 
+            try:
+                page.wait_for_selector(
+                    "button:has-text('Finalize'), button:has-text('Complete'), "
+                    "button:has-text('Check Out')",
+                    timeout=3000,
+                )
+            except PlaywrightTimeout:
+                pass
 
         finalize_clicked = page.evaluate('''() => {
             let elements = Array.from(document.querySelectorAll('button, input, a.btn'));
@@ -510,7 +562,11 @@ def _register_session(page, session: dict, target_date_str: str, self_rated_leve
         return {"status": "uncertain", "time": time_display, "date": target_date_str,
                 "message": "Booking form didn't respond. Please verify on CourtReserve."}
 
-    page.wait_for_timeout(4000)
+    if second_clicked or finalize_clicked:
+        try:
+            page.wait_for_load_state("networkidle", timeout=4000)
+        except PlaywrightTimeout:
+            pass
 
     page_text = page.inner_text("body").upper()
 
@@ -533,8 +589,7 @@ def _register_session(page, session: dict, target_date_str: str, self_rated_leve
         # CourtReserve probably changed its post-booking markup. Snapshots let us patch the
         # keyword list with concrete evidence instead of guessing.
         try:
-            from datetime import datetime as _dt
-            ts = _dt.now().strftime("%Y-%m-%dT%H-%M-%S")
+            ts = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
             snap_dir = SKILL_DIR / "debug" / f"uncertain_{ts}"
             snap_dir.mkdir(parents=True, exist_ok=True)
             page.screenshot(path=str(snap_dir / "page.png"), full_page=True)
@@ -544,6 +599,9 @@ def _register_session(page, session: dict, target_date_str: str, self_rated_leve
             _log_internal("uncertain snapshot saved", str(snap_dir))
         except Exception as _snap_err:
             _log_internal("uncertain snapshot failed", f"{type(_snap_err).__name__}: {str(_snap_err)[:200]}")
+        if level_set != "set":
+            return {"status": "uncertain", "time": time_display, "date": target_date_str,
+                    "message": f"Registration steps completed, but the Self-Rated Level field couldn't be set automatically ({level_set}). CourtReserve may have blocked Finalize because of this — please check CourtReserve to verify."}
         return {"status": "uncertain", "time": time_display, "date": target_date_str,
                 "message": "Registration steps completed but no confirmation message detected. Please check CourtReserve to verify."}
 
