@@ -89,7 +89,7 @@ For ambiguous dates only (e.g., "book me for next Friday"), tell the user the fu
     - Target time outside the user's tier window (e.g., PM member requesting 9:00 AM)
 
 ## Known Limitations
-- Only **Open Play** sessions are supported regardless of tier. Reserved courts and clinics are not bookable.
+- Only **Open Play** sessions are supported regardless of tier. Reserved courts, clinics, and **Beginner Open Play** are not bookable — Beginner sessions are explicitly excluded from the scan even though their card text also contains "Open Play".
 - The PM tier floor (2:30 PM) is assumed from the AM ceiling. Verify with Pickleball Haven if PM sessions start at a different time.
 
 ## Setup (User)

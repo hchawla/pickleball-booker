@@ -386,6 +386,14 @@ def _scan_and_book(page, target_date_str: str, card_date_str: str, dry_run: bool
         if not card_text: continue
         text = card_text
 
+        # "Beginner Open Play" cards also contain the substring "OPEN PLAY", so
+        # they'd otherwise pass the card filter and compete on time-proximity
+        # like a regular session — booking the wrong one whenever the beginner
+        # slot happened to sort closer to the target time. Only regular Open
+        # Play is supported (see SKILL.md), so exclude beginner cards outright.
+        if "BEGINNER" in text.upper():
+            continue
+
         # Skip cards not belonging to the target date.
         # Card text contains e.g. "Mon, Apr 6th, 9a - 12p" so "Apr 6" is a substring.
         if card_date_str.lower() not in text.lower():

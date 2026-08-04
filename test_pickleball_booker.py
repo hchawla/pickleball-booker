@@ -256,6 +256,66 @@ class TestDomTraversalScoping:
             "DOM traversal must check element class to stop at the card boundary"
 
 
+# ── Beginner Open Play exclusion ─────────────────────────────────────────────
+
+# Root cause of the 2026-07-31 mis-booking: "Beginner Open Play" cards also
+# contain the substring "OPEN PLAY", so they satisfied the card filter and
+# competed on time-proximity like any regular Open Play card. Requested a
+# 9:00 AM regular session; the Beginner 9:00 AM card was closer to the
+# target time than the regular one (which started at 9:15 that day), so it
+# won the sort and got booked instead.
+
+def _make_card_button(card_text: str):
+    btn = MagicMock()
+    btn.evaluate = MagicMock(return_value=card_text)
+    btn.inner_text = MagicMock(return_value="Register")
+    return btn
+
+
+class TestBeginnerSessionExclusion:
+    def test_beginner_card_not_booked_over_regular(self):
+        beginner_btn = _make_card_button(
+            "Beginner Open Play\n"
+            "Beginner Open Play/Skills 9AM-12PM\n"
+            "Fri, Jul 31st\n"
+            "9a - 12p\n"
+            "FREE"
+        )
+        regular_btn = _make_card_button(
+            "Open Play\n"
+            "Open Play/Challenge Courts 9:15AM-12PM\n"
+            "Fri, Jul 31st\n"
+            "9:15a - 12p\n"
+            "FREE"
+        )
+
+        page = MagicMock()
+        page.inner_text = MagicMock(return_value="Sessions for Fri, Jul 31st are listed below.")
+        page.locator.return_value.all.return_value = [beginner_btn, regular_btn]
+
+        result = _scan_and_book(
+            page,
+            target_date_str="Friday, July 31, 2026",
+            card_date_str="Jul 31",
+            dry_run=True,
+            target_h=9, target_m=0,
+            tier="FULL",
+        )
+
+        assert result["status"] == "dry_run"
+        times = [s["time"] for s in result["sessions"]]
+        assert len(times) == 1, (
+            f"Beginner Open Play card should be excluded from qualifying sessions, got {times}"
+        )
+        assert "15" in times[0], f"Expected the regular 9:15 AM session to survive, got {times}"
+
+    def test_source_excludes_beginner_cards(self):
+        import inspect
+        source = inspect.getsource(_scan_and_book)
+        assert "BEGINNER" in source.upper(), \
+            "_scan_and_book must filter out Beginner Open Play cards, not just any 'OPEN PLAY' match"
+
+
 # ── User-facing message hygiene ──────────────────────────────────────────────
 
 # The agent (especially small local models like gemma) treats the `message`

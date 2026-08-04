@@ -2,6 +2,11 @@
 
 All notable changes to the Pickleball Haven Booker will be documented in this file.
 
+## [0.1.0.1] - 2026-07-31
+
+### Fixed
+- Card scan matched any text containing "OPEN PLAY", which also matches "Beginner Open Play". On 2026-07-31 a 9:00 AM request booked the Beginner session instead of the regular one because it sorted closer to the target time. Cards containing "BEGINNER" are now excluded outright.
+
 ## [0.1.0.0] - 2026-04-04
 
 ### Added
