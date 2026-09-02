@@ -17,19 +17,33 @@ A standalone OpenClaw skill to automate court reservations at Pickleball Haven L
     Copy `.env.example` to `.env` and fill in your values:
     ```bash
     cp .env.example .env
-    # Edit .env with your CourtReserve email, password, and membership tier
+    # Edit .env with your CourtReserve email, password, and self-rated level
     ```
+    Then set your membership tier in `preferences.json` (see below).
     *Alternatively, use macOS Keychain with the service name `openclaw-pickleball-booker`.*
 
 ## Membership Configuration
 
-Set your membership tier in `.env` via the `MEMBERSHIP_TYPE` variable:
+Set your membership tier as `"membership_tier"` in `preferences.json`:
 
-| Tier | Value | Time Window | Notes |
-|------|-------|------------|-------|
-| AM Membership | `MEMBERSHIP_TYPE=AM` | Before 2:30 PM | **Default** if not set |
-| PM Membership | `MEMBERSHIP_TYPE=PM` | 2:30 PM onward | |
-| Full Day | `MEMBERSHIP_TYPE=FULL` | All day | No time restriction |
+```json
+{ "membership_tier": "FULL" }
+```
+
+| Tier | Value | Time Window |
+|------|-------|------------|
+| AM Membership | `"AM"` | Before 2:30 PM |
+| PM Membership | `"PM"` | 2:30 PM onward |
+| Full Day | `"FULL"` | All day, no time restriction |
+
+`preferences.json` is the source of truth. `MEMBERSHIP_TYPE` in `.env` is read
+only as a fallback for a checkout that has no `preferences.json` (it is
+`.gitignore`d, so a fresh clone won't have one).
+
+**There is no default tier.** With neither source set the booker returns an
+error asking for one rather than assuming AM — a silent AM default made a Full
+Day member's every evening request come back "no sessions found for your AM
+membership".
 
 **All tiers share these constraints:**
 
